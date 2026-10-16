@@ -437,19 +437,56 @@ function isoDate(d) { return d.toISOString().slice(0, 10); }
 dateInput.max = isoDate(new Date());
 dateInput.min = "1995-06-16";
 
+async function fetchApod(date) {
+  const url = `https://api.nasa.gov/planetary/apod?api_key=${NASA_API_KEY}&thumbs=true` + (date ? `&date=${date}` : "");
+  const res = await fetch(url);
+  const d = await res.json();
+  if (!res.ok || d.error || d.code) throw new Error((d.error && d.error.message) || d.msg || "NASA didn't return a picture.");
+  return d;
+}
+
+// What can be shown inside the page: a photo, a YouTube/Vimeo player, or a plain video file.
+function mediaHtml(d) {
+  const u = d.url || "";
+  if (d.media_type === "image") {
+    return `<a href="${d.hdurl || u}" target="_blank" rel="noopener"><img src="${u}" alt="${d.title}"></a>`;
+  }
+  if (/youtube\.com\/embed|player\.vimeo\.com/.test(u)) return `<iframe src="${u}" allowfullscreen></iframe>`;
+  if (/\.(mp4|webm|mov)(\?|$)/i.test(u)) return `<video src="${u}" controls playsinline style="width:100%;border-radius:10px;margin-bottom:10px"></video>`;
+  if (d.thumbnail_url) {
+    return `<a href="${u}" target="_blank" rel="noopener"><img src="${d.thumbnail_url}" alt="${d.title}"></a>`;
+  }
+  return null; // can't show it here
+}
+
+function dayBefore(iso) {
+  const t = new Date(iso + "T12:00:00Z"); t.setUTCDate(t.getUTCDate() - 1);
+  return isoDate(t);
+}
+
 async function loadApod(date) {
   const body = document.getElementById("apodBody");
   body.textContent = "Loading…";
-  const url = `https://api.nasa.gov/planetary/apod?api_key=${NASA_API_KEY}` + (date ? `&date=${date}` : "");
   try {
-    const res = await fetch(url);
-    const d = await res.json();
-    if (!res.ok || d.error || d.code) throw new Error((d.error && d.error.message) || d.msg || "NASA didn't return a picture.");
+    let d = await fetchApod(date);
+    let media = mediaHtml(d);
+    let note = "";
+    // If this day's entry is a video that can't play here, step back to the most recent photo.
+    if (!media) {
+      const skipped = d;
+      let tries = 0;
+      while (!media && tries < 10) {
+        d = await fetchApod(dayBefore(d.date));
+        media = mediaHtml(d);
+        tries++;
+      }
+      note = `<div class="meta">${skipped.date}'s NASA entry is a video: <a href="${skipped.url}" target="_blank" rel="noopener" style="color:var(--accent2)">watch "${skipped.title}" on NASA's site</a>. Showing the most recent photo instead.</div>`;
+      if (!media) throw new Error("No recent photo found.");
+    }
     dateInput.value = d.date;
-    const media = d.media_type === "video"
-      ? `<iframe src="${d.url}" allowfullscreen></iframe>`
-      : `<a href="${d.hdurl || d.url}" target="_blank" rel="noopener"><img src="${d.url}" alt="${d.title}"></a>`;
-    body.innerHTML = `${media}
+    const videoLink = d.media_type !== "image"
+      ? `<div class="meta"><a href="${d.url}" target="_blank" rel="noopener" style="color:var(--accent2)">▶ Open the video</a></div>` : "";
+    body.innerHTML = `${note}${media}${videoLink}
       <h3>${d.title}</h3>
       <div class="meta">${d.date}${d.copyright ? " · © " + d.copyright.trim() : ""}</div>
       <p>${d.explanation}</p>`;
