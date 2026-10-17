@@ -73,7 +73,7 @@
   #timeLabel { font-size: 13px; color: var(--accent); min-width: 150px; }
 
   #info {
-    position: absolute; top: 12px; left: 12px; max-width: 260px;
+    position: absolute; top: 104px; left: 12px; max-width: 260px; z-index: 2;
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 10px; padding: 12px 14px; font-size: 13px; line-height: 1.5;
     display: none;
@@ -111,7 +111,7 @@
 <main>
   <section class="card" id="skyCard">
     <div class="searchbar">
-      <input id="searchBox" list="skyNames" placeholder="🔍 Search a star or constellation — e.g. Sirius, Orion, Vega" autocomplete="off">
+      <input id="searchBox" list="skyNames" placeholder="🔍 Search a star, planet or constellation — e.g. Jupiter, Moon, Sirius, Orion" autocomplete="off">
       <datalist id="skyNames"></datalist>
       <button id="searchBtn">Find</button>
       <button id="clearSearch" title="Clear highlight">✕</button>
@@ -133,6 +133,7 @@
       <button id="playBtn">▶ Play</button>
       <label><input type="checkbox" id="showLines" checked> Constellations</label>
       <label><input type="checkbox" id="showNames" checked> Names</label>
+      <label><input type="checkbox" id="showPlanets" checked> Planets, Sun &amp; Moon</label>
       <button id="resetView">Reset view</button>
       <button id="shotBtn">📷 Save picture</button>
     </div>
@@ -166,6 +167,8 @@ let place = { ...DEFAULT_LOCATION };
 let minutesOffset = 0, playing = false;
 let view = { scale: 1, x: 0, y: 0 };
 let drawn = []; // stars drawn on screen, for tapping
+let drawnBodies = []; // planets, Sun & Moon drawn on screen
+let isDaytime = false;
 
 const rad = d => d * Math.PI / 180;
 const deg = r => r * 180 / Math.PI;
@@ -217,6 +220,108 @@ function colourName(bv) {
 }
 function compass(az) {
   return ["N","NE","E","SE","S","SW","W","NW"][Math.round(az / 45) % 8];
+}
+
+// ===================== PLANETS, SUN & MOON =====================
+// All positions use the J2000 frame, the same frame as the star catalogue, so planets sit in the right constellation.
+// Keplerian elements from JPL "Approximate Positions of the Planets" (valid 1800–2050).
+// [a (AU), e, I (deg), L (deg), long.peri (deg), long.node (deg)] and their rates per Julian century.
+const PLANET_ELEMENTS = {
+  Mercury: [[0.38709927, 0.20563593, 7.00497902, 252.25032350, 77.45779628, 48.33076593], [0.00000037, 0.00001906, -0.00594749, 149472.67411175, 0.16047689, -0.12534081]],
+  Venus:   [[0.72333566, 0.00677672, 3.39467605, 181.97909950, 131.60246718, 76.67984255], [0.00000390, -0.00004107, -0.00078890, 58517.81538729, 0.00268329, -0.27769418]],
+  Earth:   [[1.00000261, 0.01671123, -0.00001531, 100.46457166, 102.93768193, 0.0], [0.00000562, -0.00004392, -0.01294668, 35999.37244981, 0.32327364, 0.0]],
+  Mars:    [[1.52371034, 0.09339410, 1.84969142, -4.55343205, -23.94362959, 49.55953891], [0.00001847, 0.00007882, -0.00813131, 19140.30268499, 0.44441088, -0.29257343]],
+  Jupiter: [[5.20288700, 0.04838624, 1.30439695, 34.39644051, 14.72847983, 100.47390909], [-0.00011607, -0.00013253, -0.00183714, 3034.74612775, 0.21252668, 0.20469106]],
+  Saturn:  [[9.53667594, 0.05386179, 2.48599187, 49.95424423, 92.59887831, 113.66242448], [-0.00125060, -0.00050991, 0.00193609, 1222.49362201, -0.41897216, -0.28867794]],
+  Uranus:  [[19.18916464, 0.04725744, 0.77263783, 313.23810451, 170.95427630, 74.01692503], [-0.00196176, -0.00004397, -0.00242939, 428.48202785, 0.40805281, 0.04240589]],
+  Neptune: [[30.06992276, 0.00859048, 1.77004347, -55.12002969, 44.96476227, 131.78422574], [0.00026291, 0.00005105, 0.00035372, 218.45945325, -0.32241464, -0.00508664]]
+};
+const PLANET_STYLE = {
+  Sun:     { colour: "#ffd84a", size: 11, fact: "Our own star. Never look at it directly." },
+  Moon:    { colour: "#e8e4d8", size: 9,  fact: "Earth's natural satellite, about 384,000 km away." },
+  Mercury: { colour: "#c9b8a6", size: 4,  fact: "The smallest planet and the closest to the Sun." },
+  Venus:   { colour: "#fff3c4", size: 6,  fact: "The brightest planet, often called the morning or evening star." },
+  Mars:    { colour: "#ff7a4d", size: 5,  fact: "The red planet. Its colour comes from iron oxide (rust) dust." },
+  Jupiter: { colour: "#f2d3a2", size: 6,  fact: "The largest planet. Binoculars can show its four biggest moons." },
+  Saturn:  { colour: "#ead8a0", size: 5,  fact: "Famous for its rings, visible in a small telescope." },
+  Uranus:  { colour: "#9fe3e6", size: 3,  fact: "An ice giant tipped on its side. Barely visible without a telescope." },
+  Neptune: { colour: "#7f9cff", size: 3,  fact: "The farthest planet. Needs a telescope to see." }
+};
+const OBLIQUITY = 23.43928;
+
+function daysSinceJ2000(date) { return date.getTime() / 86400000 + 2440587.5 - 2451545.0; }
+
+function solveKepler(M, e) {          // M, E in radians
+  let E = M + e * Math.sin(M);
+  for (let i = 0; i < 8; i++) E -= (E - e * Math.sin(E) - M) / (1 - e * Math.cos(E));
+  return E;
+}
+
+function helioEcliptic(name, T) {     // T = Julian centuries since J2000; returns AU in ecliptic J2000 frame
+  const [el, rate] = PLANET_ELEMENTS[name];
+  const a = el[0] + rate[0] * T, e = el[1] + rate[1] * T, I = rad(el[2] + rate[2] * T);
+  const L = el[3] + rate[3] * T, wbar = el[4] + rate[4] * T, node = el[5] + rate[5] * T;
+  const w = rad(wbar - node), O = rad(node);
+  let M = ((L - wbar) % 360 + 540) % 360 - 180;
+  const E = solveKepler(rad(M), e);
+  const xp = a * (Math.cos(E) - e), yp = a * Math.sqrt(1 - e * e) * Math.sin(E);
+  const cw = Math.cos(w), sw = Math.sin(w), cO = Math.cos(O), sO = Math.sin(O), cI = Math.cos(I), sI = Math.sin(I);
+  return {
+    x: (cw * cO - sw * sO * cI) * xp + (-sw * cO - cw * sO * cI) * yp,
+    y: (cw * sO + sw * cO * cI) * xp + (-sw * sO + cw * cO * cI) * yp,
+    z: (sw * sI) * xp + (cw * sI) * yp
+  };
+}
+
+function eclToRaDec(x, y, z) {
+  const ob = rad(OBLIQUITY);
+  const xe = x, ye = y * Math.cos(ob) - z * Math.sin(ob), ze = y * Math.sin(ob) + z * Math.cos(ob);
+  return { ra: (deg(Math.atan2(ye, xe)) + 360) % 360, dec: deg(Math.atan2(ze, Math.hypot(xe, ye))), dist: Math.hypot(xe, ye, ze) };
+}
+
+function moonPosition(date) {         // low-precision lunar theory (good to ~0.3°), returned in the J2000 frame like the stars
+  const d = daysSinceJ2000(date);
+  const precess = rad(1.3969 * d / 36525);
+  const L = rad(218.316 + 13.176396 * d), M = rad(134.963 + 13.064993 * d), F = rad(93.272 + 13.229350 * d);
+  const D = rad(297.850 + 12.190749 * d), Ms = rad(357.529 + 0.98560028 * d);
+  const lon = -precess + L + rad(6.289) * Math.sin(M) + rad(1.274) * Math.sin(2 * D - M) + rad(0.658) * Math.sin(2 * D)
+            + rad(0.214) * Math.sin(2 * M) - rad(0.186) * Math.sin(Ms) - rad(0.114) * Math.sin(2 * F);
+  const lat = rad(5.128) * Math.sin(F) + rad(0.281) * Math.sin(M + F) + rad(0.278) * Math.sin(M - F) - rad(0.173) * Math.sin(F - 2 * D);
+  // ecliptic of date -> equatorial
+  const ob = rad(OBLIQUITY);
+  const x = Math.cos(lat) * Math.cos(lon), y = Math.cos(lat) * Math.sin(lon), z = Math.sin(lat);
+  const ye = y * Math.cos(ob) - z * Math.sin(ob), ze = y * Math.sin(ob) + z * Math.cos(ob);
+  return { ra: (deg(Math.atan2(ye, x)) + 360) % 360, dec: deg(Math.asin(ze)), lonDeg: (deg(lon) % 360 + 360) % 360 };
+}
+
+function moonPhaseName(elong) {       // elongation of Moon east of Sun, 0..360
+  const p = elong;
+  if (p < 10 || p > 350) return "New Moon";
+  if (p < 80) return "Waxing crescent";
+  if (p < 100) return "First quarter";
+  if (p < 170) return "Waxing gibbous";
+  if (p < 190) return "Full Moon";
+  if (p < 260) return "Waning gibbous";
+  if (p < 280) return "Last quarter";
+  return "Waning crescent";
+}
+
+function solarSystem(date) {
+  const T = daysSinceJ2000(date) / 36525;
+  const earth = helioEcliptic("Earth", T);
+  const out = [];
+  const sunEq = eclToRaDec(-earth.x, -earth.y, -earth.z);
+  out.push({ name: "Sun", ra: sunEq.ra, dec: sunEq.dec, dist: sunEq.dist });
+  for (const name of ["Mercury", "Venus", "Mars", "Jupiter", "Saturn", "Uranus", "Neptune"]) {
+    const p = helioEcliptic(name, T);
+    const g = eclToRaDec(p.x - earth.x, p.y - earth.y, p.z - earth.z);
+    out.push({ name, ra: g.ra, dec: g.dec, dist: g.dist });
+  }
+  const m = moonPosition(date);
+  const sunLon = (deg(Math.atan2(-earth.y, -earth.x)) + 360) % 360;
+  const elong = ((m.lonDeg - sunLon) % 360 + 360) % 360;
+  out.push({ name: "Moon", ra: m.ra, dec: m.dec, phase: moonPhaseName(elong), lit: Math.round((1 - Math.cos(rad(elong))) / 2 * 100), elong });
+  return out;
 }
 
 // ===================== LOADING =====================
@@ -349,8 +454,45 @@ function draw() {
     }
   }
 
+  // planets, Sun & Moon
+  drawnBodies = [];
+  const bodies = solarSystem(now);
+  const sunBody = bodies.find(b => b.name === "Sun");
+  const sunH = toHorizon(sunBody.ra, sunBody.dec, lst, place.lat);
+  if (document.getElementById("showPlanets").checked) {
+    const sunP = project(sunH.alt, sunH.az, size);
+    for (const b of bodies) {
+      const h = toHorizon(b.ra, b.dec, lst, place.lat);
+      if (h.alt < 0) continue;
+      const p = project(h.alt, h.az, size);
+      const st = PLANET_STYLE[b.name];
+      const r = st.size * Math.max(1, Math.sqrt(view.scale) * 0.9);
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r * 3.2);
+      g.addColorStop(0, st.colour + "aa"); g.addColorStop(1, st.colour + "00");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, r * 3.2, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = st.colour; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+      if (b.name === "Moon") {              // shade the unlit part toward the side away from the Sun
+        const ang = Math.atan2(sunP.y - p.y, sunP.x - p.x);
+        const off = 2 * r * b.lit / 100;
+        ctx.save(); ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.clip();
+        ctx.fillStyle = "rgba(6,10,26,0.88)";
+        ctx.beginPath(); ctx.arc(p.x - Math.cos(ang) * off, p.y - Math.sin(ang) * off, r, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+      }
+      if (b.name === "Saturn") {
+        ctx.strokeStyle = st.colour; ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.ellipse(p.x, p.y, r * 2.1, r * 0.7, -0.4, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.fillStyle = "#ffffff"; ctx.font = "600 12px Inter"; ctx.textAlign = "left";
+      ctx.fillText(b.name, p.x + r + 5, p.y - r - 2);
+      drawnBodies.push({ b, x: p.x, y: p.y, alt: h.alt, az: h.az, r });
+    }
+  }
+  isDaytime = sunH.alt > -6;
+
   // search highlight
   if (target) {
+    if (target.body) { const b = bodies.find(x => x.name === target.body); target.ra = b.ra; target.dec = b.dec; }
     const h = toHorizon(target.ra, target.dec, lst, place.lat);
     if (h.alt > -1) {
       const p = project(h.alt, h.az, size);
@@ -360,12 +502,13 @@ function draw() {
       ctx.strokeStyle = "rgba(255,211,110,0.35)"; ctx.lineWidth = 6;
       ctx.beginPath(); ctx.arc(p.x, p.y, pulse + 6, 0, Math.PI * 2); ctx.stroke();
       ctx.fillStyle = "#ffd36e"; ctx.font = "600 13px Inter"; ctx.textAlign = "left";
-      ctx.fillText(target.label, p.x + pulse + 8, p.y + 4);
+      if (!target.body || !document.getElementById("showPlanets").checked) ctx.fillText(target.label, p.x + pulse + 8, p.y + 4);
     }
   }
 
   document.getElementById("timeLabel").textContent =
-    now.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" });
+    now.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" }) +
+    (isDaytime ? "  ·  ☀ Daytime (stars hidden by sunlight)" : "");
 }
 
 // ===================== INTERACTION =====================
@@ -417,6 +560,8 @@ function zoomAt(factor, clientX, clientY) {
 function tapAt(clientX, clientY) {
   const rect = canvas.getBoundingClientRect();
   const x = clientX - rect.left, y = clientY - rect.top;
+  const hitBody = drawnBodies.find(d => Math.hypot(d.x - x, d.y - y) < d.r + 10);
+  if (hitBody) { showBodyInfo(hitBody.b, hitBody.alt, hitBody.az); return; }
   let best = null, bestD = 18;
   for (const d of drawn) {
     const dist = Math.hypot(d.x - x, d.y - y) - (6 - d.s.mag);
@@ -449,14 +594,19 @@ function buildSearchIndex() {
   for (const c of conNames) {
     searchIndex.push({ key: c.name.toLowerCase(), label: c.name, ra: c.ra, dec: c.dec, kind: "constellation" });
   }
+  for (const name of Object.keys(PLANET_STYLE)) {
+    searchIndex.push({ key: name.toLowerCase(), label: name, kind: name === "Sun" ? "star" : name === "Moon" ? "moon" : "planet", body: name });
+  }
   searchIndex.sort((a, b) => a.label.localeCompare(b.label));
   const dl = document.getElementById("skyNames");
-  dl.innerHTML = searchIndex.map(e => `<option value="${e.label}">${e.kind === "star" ? "Star" : "Constellation"}</option>`).join("");
+  dl.innerHTML = searchIndex.map(e => `<option value="${e.label}">${e.body ? (e.body === "Sun" ? "Our Sun" : e.body === "Moon" ? "Moon" : "Planet") : e.kind === "star" ? "Star" : "Constellation"}</option>`).join("");
 }
 
 function findEntry(q) {
   q = q.trim().toLowerCase();
   if (!q) return null;
+  const exactBody = searchIndex.find(e => e.body && e.key === q);
+  if (exactBody) return exactBody;
   return searchIndex.find(e => e.key === q)
       || searchIndex.find(e => e.key.startsWith(q))
       || searchIndex.find(e => e.key.includes(q));
@@ -470,20 +620,24 @@ function doSearch() {
   const e = findEntry(document.getElementById("searchBox").value);
   if (!e) { msg.innerHTML = "No star or constellation found with that name. Try <b>Sirius</b>, <b>Orion</b> or <b>Vega</b>."; target = null; draw(); return; }
   document.getElementById("searchBox").value = e.label;
-  target = { ra: e.ra, dec: e.dec, label: e.label, kind: e.kind };
   const now = currentTime();
-  const h = toHorizon(e.ra, e.dec, localSiderealDeg(now, place.lon), place.lat);
-  const kindTxt = e.kind === "star" ? "star" : "constellation";
+  const posAt = t => e.body ? solarSystem(t).find(b => b.name === e.body) : e;
+  const pos = posAt(now);
+  target = { ra: pos.ra, dec: pos.dec, label: e.label, kind: e.kind, body: e.body };
+  const h = toHorizon(pos.ra, pos.dec, localSiderealDeg(now, place.lon), place.lat);
+  const kindTxt = e.body ? (e.body === "Sun" ? "our star" : e.body === "Moon" ? "Moon" : "planet") : e.kind === "star" ? "star" : "constellation";
   if (h.alt > 0) {
     centreOn(h.alt, h.az, e.kind === "star" ? 3 : 2);
-    msg.innerHTML = `<b>${e.label}</b> (${kindTxt}) is up right now — ${Math.round(h.alt)}° above the horizon, towards ${compass(h.az)}.`;
+    msg.innerHTML = `<b>${e.label}</b>${e.body === "Moon" ? "" : " (" + kindTxt + ")"} is up right now — ${Math.round(h.alt)}° above the horizon, towards ${compass(h.az)}.`;
     if (e.star) showStarInfo(e.star, h.alt, h.az);
+    if (e.body) showBodyInfo(pos, h.alt, h.az);
   } else {
     // look ahead up to 24 h for the next time it rises above 5°
     let rise = null;
     for (let m = 5; m <= 1440; m += 5) {
       const t = new Date(now.getTime() + m * 60000);
-      if (toHorizon(e.ra, e.dec, localSiderealDeg(t, place.lon), place.lat).alt > 5) { rise = m; break; }
+      const pt = posAt(t);
+      if (toHorizon(pt.ra, pt.dec, localSiderealDeg(t, place.lon), place.lat).alt > 5) { rise = m; break; }
     }
     hideInfo();
     view = { scale: 1, x: 0, y: 0 };
@@ -507,6 +661,21 @@ function centreOn(alt, az, scale) {
   const size = canvas.clientWidth;
   const p = project(alt, az, size);
   view.x = size / 2 - p.x; view.y = size / 2 - p.y;
+}
+
+function showBodyInfo(b, alt, az) {
+  const st = PLANET_STYLE[b.name];
+  let extra = "";
+  if (b.name === "Moon") extra = `Phase: ${b.phase} (${b.lit}% lit)<br>`;
+  else if (b.name === "Sun") extra = `Distance: ${(b.dist * 149.6).toFixed(1)} million km<br>`;
+  else extra = `Distance from Earth: ${(b.dist * 149.6).toFixed(0)} million km<br>Light takes ${(b.dist * 8.317).toFixed(0)} minutes to reach us<br>`;
+  document.getElementById("infoBody").innerHTML = `
+    <h3>${b.name}</h3>
+    ${st.fact}<br>
+    ${extra}
+    Where to look: ${Math.round(alt)}° up, towards ${compass(az)}<br>
+    <span style="color:var(--muted)">RA ${(b.ra / 15).toFixed(2)}h · Dec ${b.dec.toFixed(1)}°</span>`;
+  document.getElementById("info").style.display = "block";
 }
 
 function showStarInfo(s, alt, az) {
@@ -537,6 +706,7 @@ document.getElementById("nowBtn").onclick = () => { minutesOffset = 0; document.
 document.getElementById("playBtn").onclick = e => { playing = !playing; e.target.textContent = playing ? "⏸ Pause" : "▶ Play"; };
 document.getElementById("showLines").onchange = draw;
 document.getElementById("showNames").onchange = draw;
+document.getElementById("showPlanets").onchange = draw;
 document.getElementById("resetView").onclick = () => { view = { scale: 1, x: 0, y: 0 }; draw(); };
 document.getElementById("shotBtn").onclick = () => {
   const a = document.createElement("a");
