@@ -50,6 +50,15 @@
   }
   #sky:active { cursor: grabbing; }
 
+  .searchbar { display: flex; gap: 8px; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .searchbar input {
+    flex: 1; min-width: 180px; background: #0b1230; color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px; font: inherit; font-size: 14px;
+  }
+  .searchbar input:focus { outline: 2px solid var(--accent2); }
+  #searchMsg { font-size: 13px; color: var(--muted); width: 100%; }
+  #searchMsg b { color: var(--accent); }
+  #searchMsg button { margin-left: 6px; padding: 4px 10px; }
   .controls {
     display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
     padding: 12px 14px; border-top: 1px solid var(--border);
@@ -101,6 +110,13 @@
 
 <main>
   <section class="card" id="skyCard">
+    <div class="searchbar">
+      <input id="searchBox" list="skyNames" placeholder="🔍 Search a star or constellation — e.g. Sirius, Orion, Vega" autocomplete="off">
+      <datalist id="skyNames"></datalist>
+      <button id="searchBtn">Find</button>
+      <button id="clearSearch" title="Clear highlight">✕</button>
+      <div id="searchMsg">Type a name and press Enter.</div>
+    </div>
     <canvas id="sky"></canvas>
 
     <div id="info">
@@ -228,6 +244,7 @@ async function loadData() {
       dec: f.geometry.coordinates[1]
     }));
     setStatus();
+    buildSearchIndex();
     draw();
   } catch (e) {
     document.getElementById("status").textContent = "Couldn't load star data. Check your internet and refresh.";
@@ -332,6 +349,21 @@ function draw() {
     }
   }
 
+  // search highlight
+  if (target) {
+    const h = toHorizon(target.ra, target.dec, lst, place.lat);
+    if (h.alt > -1) {
+      const p = project(h.alt, h.az, size);
+      const pulse = 14 + 5 * Math.sin(Date.now() / 250);
+      ctx.strokeStyle = "rgba(255,211,110,0.95)"; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(p.x, p.y, pulse, 0, Math.PI * 2); ctx.stroke();
+      ctx.strokeStyle = "rgba(255,211,110,0.35)"; ctx.lineWidth = 6;
+      ctx.beginPath(); ctx.arc(p.x, p.y, pulse + 6, 0, Math.PI * 2); ctx.stroke();
+      ctx.fillStyle = "#ffd36e"; ctx.font = "600 13px Inter"; ctx.textAlign = "left";
+      ctx.fillText(target.label, p.x + pulse + 8, p.y + 4);
+    }
+  }
+
   document.getElementById("timeLabel").textContent =
     now.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit", day: "numeric", month: "short" });
 }
@@ -402,6 +434,102 @@ function tapAt(clientX, clientY) {
     <span style="color:var(--muted)">RA ${(s.ra / 15).toFixed(2)}h · Dec ${s.dec.toFixed(1)}°</span>`;
   document.getElementById("info").style.display = "block";
 }
+// ===================== SEARCH =====================
+let target = null;          // {ra, dec, label, kind}
+let searchIndex = [];       // [{key, label, ra, dec, kind, star}]
+
+function buildSearchIndex() {
+  searchIndex = [];
+  const byId = new Map(stars.map(s => [String(s.id), s]));
+  for (const [id, info] of Object.entries(starNames)) {
+    const s = byId.get(String(id));
+    if (!s || !info || !info.name) continue;
+    searchIndex.push({ key: info.name.toLowerCase(), label: info.name, ra: s.ra, dec: s.dec, kind: "star", star: s });
+  }
+  for (const c of conNames) {
+    searchIndex.push({ key: c.name.toLowerCase(), label: c.name, ra: c.ra, dec: c.dec, kind: "constellation" });
+  }
+  searchIndex.sort((a, b) => a.label.localeCompare(b.label));
+  const dl = document.getElementById("skyNames");
+  dl.innerHTML = searchIndex.map(e => `<option value="${e.label}">${e.kind === "star" ? "Star" : "Constellation"}</option>`).join("");
+}
+
+function findEntry(q) {
+  q = q.trim().toLowerCase();
+  if (!q) return null;
+  return searchIndex.find(e => e.key === q)
+      || searchIndex.find(e => e.key.startsWith(q))
+      || searchIndex.find(e => e.key.includes(q));
+}
+
+function fmtTime(d) { return d.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }); }
+
+function doSearch() {
+  const msg = document.getElementById("searchMsg");
+  if (!searchIndex.length) { msg.textContent = "Star catalogue is still loading — try again in a moment."; return; }
+  const e = findEntry(document.getElementById("searchBox").value);
+  if (!e) { msg.innerHTML = "No star or constellation found with that name. Try <b>Sirius</b>, <b>Orion</b> or <b>Vega</b>."; target = null; draw(); return; }
+  document.getElementById("searchBox").value = e.label;
+  target = { ra: e.ra, dec: e.dec, label: e.label, kind: e.kind };
+  const now = currentTime();
+  const h = toHorizon(e.ra, e.dec, localSiderealDeg(now, place.lon), place.lat);
+  const kindTxt = e.kind === "star" ? "star" : "constellation";
+  if (h.alt > 0) {
+    centreOn(h.alt, h.az, e.kind === "star" ? 3 : 2);
+    msg.innerHTML = `<b>${e.label}</b> (${kindTxt}) is up right now — ${Math.round(h.alt)}° above the horizon, towards ${compass(h.az)}.`;
+    if (e.star) showStarInfo(e.star, h.alt, h.az);
+  } else {
+    // look ahead up to 24 h for the next time it rises above 5°
+    let rise = null;
+    for (let m = 5; m <= 1440; m += 5) {
+      const t = new Date(now.getTime() + m * 60000);
+      if (toHorizon(e.ra, e.dec, localSiderealDeg(t, place.lon), place.lat).alt > 5) { rise = m; break; }
+    }
+    hideInfo();
+    view = { scale: 1, x: 0, y: 0 };
+    if (rise === null) {
+      msg.innerHTML = `<b>${e.label}</b> never rises above the horizon from ${place.name} — it's too far ${e.dec < 0 ? "south" : "north"} in the sky.`;
+    } else {
+      const when = new Date(now.getTime() + rise * 60000);
+      const canJump = minutesOffset + rise <= 720;
+      msg.innerHTML = `<b>${e.label}</b> is below the horizon now. It rises around <b>${fmtTime(when)}</b>.` +
+        (canJump ? ` <button id="jumpBtn">Show me then</button>` : "");
+      if (canJump) document.getElementById("jumpBtn").onclick = () => {
+        minutesOffset += rise + 30; document.getElementById("timeSlider").value = minutesOffset; doSearch();
+      };
+    }
+  }
+  draw();
+}
+
+function centreOn(alt, az, scale) {
+  view = { scale, x: 0, y: 0 };
+  const size = canvas.clientWidth;
+  const p = project(alt, az, size);
+  view.x = size / 2 - p.x; view.y = size / 2 - p.y;
+}
+
+function showStarInfo(s, alt, az) {
+  const nm = (starNames[s.id] && starNames[s.id].name) || `HIP ${s.id}`;
+  const bright = s.mag < 1 ? "one of the brightest stars in the sky" : s.mag < 3 ? "easy to see" : s.mag < 5 ? "visible from darker places" : "faint, needs a dark sky";
+  document.getElementById("infoBody").innerHTML = `
+    <h3>${nm}</h3>
+    Brightness: magnitude ${s.mag.toFixed(2)} (${bright})<br>
+    Colour: ${colourName(s.bv)}<br>
+    Where to look: ${Math.round(alt)}° up, towards ${compass(az)}<br>
+    <span style="color:var(--muted)">RA ${(s.ra / 15).toFixed(2)}h · Dec ${s.dec.toFixed(1)}°</span>`;
+  document.getElementById("info").style.display = "block";
+}
+
+document.getElementById("searchBtn").onclick = doSearch;
+document.getElementById("searchBox").addEventListener("keydown", ev => { if (ev.key === "Enter") doSearch(); });
+document.getElementById("searchBox").addEventListener("change", () => { if (findEntry(document.getElementById("searchBox").value)?.label === document.getElementById("searchBox").value) doSearch(); });
+document.getElementById("clearSearch").onclick = () => {
+  target = null; document.getElementById("searchBox").value = "";
+  document.getElementById("searchMsg").textContent = "Type a name and press Enter.";
+  hideInfo(); view = { scale: 1, x: 0, y: 0 }; draw();
+};
+
 function hideInfo() { document.getElementById("info").style.display = "none"; }
 
 document.getElementById("timeSlider").addEventListener("input", e => { minutesOffset = +e.target.value; draw(); });
