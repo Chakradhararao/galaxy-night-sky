@@ -64,6 +64,10 @@
     padding: 12px 14px; border-top: 1px solid var(--border);
   }
   .controls label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .viewmodes { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px 14px 0 14px; font-size: 13px; color: var(--muted); }
+  .viewmodes label { display: flex; align-items: center; gap: 5px; background: #121a3a; border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px; cursor: pointer; color: var(--text); }
+  .viewmodes label:has(input:checked) { background: #24326a; border-color: var(--accent2); }
+  .viewmodes input { accent-color: var(--accent); margin: 0; }
   button {
     background: #1a2550; color: var(--text); border: 1px solid var(--border);
     border-radius: 8px; padding: 7px 12px; font: inherit; font-size: 13px; cursor: pointer;
@@ -81,7 +85,7 @@
   #info h3 { color: var(--accent); font-size: 15px; margin-bottom: 4px; }
   #info .close { position: absolute; top: 6px; right: 8px; background: none; border: none; color: var(--muted); font-size: 16px; padding: 2px 6px; }
 
-  .legend { position: absolute; bottom: 70px; right: 14px; font-size: 11px; color: var(--muted); text-align: right; pointer-events: none; }
+  .legend { position: absolute; top: 104px; right: 14px; font-size: 11px; color: var(--muted); text-align: right; pointer-events: none; }
 
   #apod { display: flex; flex-direction: column; }
   #apod .head { padding: 14px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -126,11 +130,20 @@
 
     <div class="legend">N at top · E on left<br>Drag to move · scroll / pinch to zoom · tap a star</div>
 
+    <div class="viewmodes" id="viewModes">
+      <span>Show:</span>
+      <label><input type="radio" name="viewMode" value="all" checked> Everything</label>
+      <label><input type="radio" name="viewMode" value="planets"> Planets, Sun &amp; Moon only</label>
+      <label><input type="radio" name="viewMode" value="stars"> Stars only</label>
+      <label><input type="radio" name="viewMode" value="constellations"> Constellations</label>
+      <label><input type="radio" name="viewMode" value="custom"> Custom</label>
+    </div>
     <div class="controls">
       <button id="nowBtn">Now</button>
       <input type="range" id="timeSlider" min="-720" max="720" value="0" step="5" title="Hours from now">
       <span id="timeLabel"></span>
       <button id="playBtn">▶ Play</button>
+      <label><input type="checkbox" id="showStars" checked> Stars</label>
       <label><input type="checkbox" id="showLines" checked> Constellations</label>
       <label><input type="checkbox" id="showNames" checked> Names</label>
       <label><input type="checkbox" id="showPlanets" checked> Planets, Sun &amp; Moon</label>
@@ -417,7 +430,7 @@ function draw() {
   // stars
   drawn = [];
   const zoomBoost = Math.sqrt(view.scale);
-  for (const s of stars) {
+  for (const s of (document.getElementById("showStars").checked ? stars : [])) {
     const h = toHorizon(s.ra, s.dec, lst, place.lat);
     if (h.alt < 0) continue;
     const p = project(h.alt, h.az, size);
@@ -704,9 +717,25 @@ function hideInfo() { document.getElementById("info").style.display = "none"; }
 document.getElementById("timeSlider").addEventListener("input", e => { minutesOffset = +e.target.value; draw(); });
 document.getElementById("nowBtn").onclick = () => { minutesOffset = 0; document.getElementById("timeSlider").value = 0; draw(); };
 document.getElementById("playBtn").onclick = e => { playing = !playing; e.target.textContent = playing ? "⏸ Pause" : "▶ Play"; };
-document.getElementById("showLines").onchange = draw;
-document.getElementById("showNames").onchange = draw;
-document.getElementById("showPlanets").onchange = draw;
+// display toggles: presets via the "Show" radio buttons, any other mix via the checkboxes
+const VIEW_PRESETS = {
+  all:            { showStars: true,  showLines: true,  showNames: true,  showPlanets: true  },
+  planets:        { showStars: false, showLines: false, showNames: false, showPlanets: true  },
+  stars:          { showStars: true,  showLines: false, showNames: true,  showPlanets: false },
+  constellations: { showStars: true,  showLines: true,  showNames: true,  showPlanets: false }
+};
+const TOGGLES = ["showStars", "showLines", "showNames", "showPlanets"];
+document.querySelectorAll('input[name="viewMode"]').forEach(r => r.addEventListener("change", () => {
+  const preset = VIEW_PRESETS[r.value];
+  if (preset) TOGGLES.forEach(id => document.getElementById(id).checked = preset[id]);
+  draw();
+}));
+TOGGLES.forEach(id => document.getElementById(id).addEventListener("change", () => {
+  const state = Object.fromEntries(TOGGLES.map(t => [t, document.getElementById(t).checked]));
+  const match = Object.entries(VIEW_PRESETS).find(([, p]) => TOGGLES.every(t => p[t] === state[t]));
+  document.querySelector(`input[name="viewMode"][value="${match ? match[0] : "custom"}"]`).checked = true;
+  draw();
+}));
 document.getElementById("resetView").onclick = () => { view = { scale: 1, x: 0, y: 0 }; draw(); };
 document.getElementById("shotBtn").onclick = () => {
   const a = document.createElement("a");
@@ -762,34 +791,80 @@ function dayBefore(iso) {
   return isoDate(t);
 }
 
+// NASA's APOD service sometimes returns a placeholder page ("NASA Science", NASA logo,
+// "please enable JavaScript") instead of a real picture. Spot that and fall back to the NASA Image Library.
+function isBrokenApod(d) {
+  return !d || d.title === "NASA Science" || /enable JavaScript/i.test(d.explanation || "") || /nasa-logo/i.test(d.url || "");
+}
+
+const LIBRARY_TOPICS = ["galaxy", "nebula", "hubble", "james webb", "saturn", "jupiter", "aurora", "milky way", "star cluster", "mars surface", "moon", "supernova"];
+
+async function loadLibraryPhoto(date) {
+  const day = Math.floor(new Date(date + "T00:00:00Z").getTime() / 86400000);
+  const topic = LIBRARY_TOPICS[day % LIBRARY_TOPICS.length];
+  const res = await fetch(`https://images-api.nasa.gov/search?q=${encodeURIComponent(topic)}&media_type=image&page_size=100`);
+  const j = await res.json();
+  const items = (j.collection && j.collection.items || []).filter(it => it.links && it.links[0] && it.data && it.data[0]);
+  if (!items.length) throw new Error("NASA Image Library returned no photos.");
+  const it = items[(day * 7919) % items.length];
+  const d = it.data[0];
+  const thumb = it.links[0].href;
+  const big = thumb.replace(/~(thumb|small|medium)\.jpg$/, "~large.jpg");
+  const desc = (d.description || "").replace(/<[^>]+>/g, "").slice(0, 700);
+  return { title: d.title, date: (d.date_created || "").slice(0, 10), center: d.center, thumb, big,
+           link: `https://images.nasa.gov/details/${encodeURIComponent(d.nasa_id)}`, desc, topic };
+}
+
 async function loadApod(date) {
   const body = document.getElementById("apodBody");
   body.textContent = "Loading…";
+  const wanted = date || isoDate(new Date());
+  let apodProblem = "";
   try {
     let d = await fetchApod(date);
-    let media = mediaHtml(d);
-    let note = "";
-    // If this day's entry is a video that can't play here, step back to the most recent photo.
-    if (!media) {
-      const skipped = d;
-      let tries = 0;
-      while (!media && tries < 10) {
-        d = await fetchApod(dayBefore(d.date));
-        media = mediaHtml(d);
-        tries++;
+    if (!isBrokenApod(d)) {
+      let media = mediaHtml(d);
+      let note = "";
+      // If this day's entry is a video that can't play here, step back to the most recent photo.
+      if (!media) {
+        const skipped = d;
+        let tries = 0;
+        while (!media && tries < 10) {
+          d = await fetchApod(dayBefore(d.date));
+          if (isBrokenApod(d)) break;
+          media = mediaHtml(d);
+          tries++;
+        }
+        note = `<div class="meta">${skipped.date}'s NASA entry is a video: <a href="${skipped.url}" target="_blank" rel="noopener" style="color:var(--accent2)">watch "${skipped.title}" on NASA's site</a>. Showing the most recent photo instead.</div>`;
       }
-      note = `<div class="meta">${skipped.date}'s NASA entry is a video: <a href="${skipped.url}" target="_blank" rel="noopener" style="color:var(--accent2)">watch "${skipped.title}" on NASA's site</a>. Showing the most recent photo instead.</div>`;
-      if (!media) throw new Error("No recent photo found.");
+      if (media && !isBrokenApod(d)) {
+        dateInput.value = d.date;
+        const videoLink = d.media_type !== "image"
+          ? `<div class="meta"><a href="${d.url}" target="_blank" rel="noopener" style="color:var(--accent2)">▶ Open the video</a></div>` : "";
+        body.innerHTML = `${note}${media}${videoLink}
+          <h3>${d.title}</h3>
+          <div class="meta">${d.date}${d.copyright ? " · © " + d.copyright.trim() : ""}</div>
+          <p>${d.explanation}</p>`;
+        return;
+      }
     }
-    dateInput.value = d.date;
-    const videoLink = d.media_type !== "image"
-      ? `<div class="meta"><a href="${d.url}" target="_blank" rel="noopener" style="color:var(--accent2)">▶ Open the video</a></div>` : "";
-    body.innerHTML = `${note}${media}${videoLink}
-      <h3>${d.title}</h3>
-      <div class="meta">${d.date}${d.copyright ? " · © " + d.copyright.trim() : ""}</div>
-      <p>${d.explanation}</p>`;
+    apodProblem = "NASA's Picture of the Day service isn't sending pictures right now";
   } catch (e) {
-    body.innerHTML = `<div class="err">Couldn't load NASA's picture: ${e.message}</div>`;
+    apodProblem = "NASA's Picture of the Day service isn't responding right now";
+  }
+  // Fallback: a real NASA photo from the NASA Image Library, chosen by date so it changes every day
+  try {
+    const p = await loadLibraryPhoto(wanted);
+    dateInput.value = wanted;
+    body.innerHTML = `
+      <div class="meta">${apodProblem}, so here is a NASA photo of the day from the
+        <a href="https://images.nasa.gov" target="_blank" rel="noopener" style="color:var(--accent2)">NASA Image Library</a> instead.</div>
+      <a href="${p.big}" target="_blank" rel="noopener"><img src="${p.thumb}" alt="${p.title}"></a>
+      <h3>${p.title}</h3>
+      <div class="meta">${p.date}${p.center ? " · NASA " + p.center : ""} · <a href="${p.link}" target="_blank" rel="noopener" style="color:var(--accent2)">details</a></div>
+      <p>${p.desc}${p.desc.length >= 700 ? "…" : ""}</p>`;
+  } catch (e2) {
+    body.innerHTML = `<div class="err">${apodProblem}, and the NASA Image Library could not be reached either. Please try again later.</div>`;
   }
 }
 dateInput.addEventListener("change", () => loadApod(dateInput.value));
